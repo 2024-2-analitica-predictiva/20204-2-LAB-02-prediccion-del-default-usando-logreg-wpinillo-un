@@ -95,3 +95,151 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import balanced_accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import pickle
+import gzip
+import os
+import json
+
+# Cargar y limpiar datos
+def load_and_clean_data(file_path):
+    data = pd.read_csv(file_path)
+    data.rename(columns={"default payment next month": "default"}, inplace=True)
+    data.drop(columns=["ID"], inplace=True)  # Eliminar la columna 'ID'
+    data.dropna(inplace=True)  # Eliminar filas con valores nulos
+    data["EDUCATION"] = data["EDUCATION"].apply(lambda x: 4 if x > 4 else x)  # Agrupar valores > 4 en "others"
+    data = data.loc[(data["MARRIAGE"] != 0) & (data["EDUCATION"] != 0)]  # Filtrar valores no válidos
+    return data
+
+# Cargar datasets
+train_data = load_and_clean_data("files/input/train_data.csv.zip")
+test_data = load_and_clean_data("files/input/test_data.csv.zip")
+
+# Dividir en variables independientes y dependientes
+X_train = train_data.drop(columns=["default"])
+y_train = train_data["default"]
+
+X_test = test_data.drop(columns=["default"])
+y_test = test_data["default"]
+
+# Definir características categóricas y numéricas
+categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+numerical_features = [col for col in X_train.columns if col not in categorical_features]
+
+# Preprocesador de datos
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(), categorical_features),
+        ('scaler', MinMaxScaler(), numerical_features),
+    ],
+    remainder="passthrough"
+)
+
+# Crear pipeline
+pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ('feature_selection', SelectKBest(score_func=f_classif)),
+    ('classifier', LogisticRegression(random_state=42))
+])
+
+# Definir búsqueda de hiperparámetros
+param_grid = {
+    'feature_selection__k': range(1, 11),
+    'classifier__C': [0.001, 0.01, 0.1, 1, 10, 100],
+    'classifier__penalty': ['l1', 'l2'],
+    'classifier__solver': ['liblinear'],
+    'classifier__max_iter': [100, 200],
+}
+
+# Ajustar modelo con validación cruzada
+model = GridSearchCV(
+    pipeline,
+    param_grid,
+    cv=10,
+    scoring="balanced_accuracy",
+    n_jobs=-1,
+    refit=True
+)
+
+model.fit(X_train, y_train)
+
+# Guardar modelo
+os.makedirs("files/models", exist_ok=True)
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    pickle.dump(model, f)
+
+# Calcular métricas
+y_train_pred = model.predict(X_train)
+y_test_pred = model.predict(X_test)
+
+metrics = [
+    {
+        "type": "metrics",
+        "dataset": "train",
+        "precision": float(precision_score(y_train, y_train_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_train, y_train_pred)),
+        "recall": float(recall_score(y_train, y_train_pred)),
+        "f1_score": float(f1_score(y_train, y_train_pred)),
+    },
+    {
+        "type": "metrics",
+        "dataset": "test",
+        "precision": float(precision_score(y_test, y_test_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_test, y_test_pred)),
+        "recall": float(recall_score(y_test, y_test_pred)),
+        "f1_score": float(f1_score(y_test, y_test_pred)),
+    }
+]
+
+# Calcular matrices de confusión
+train_cm = confusion_matrix(y_train, y_train_pred)
+test_cm = confusion_matrix(y_test, y_test_pred)
+
+confusion_matrices = [
+    {
+        "type": "cm_matrix",
+        "dataset": "train",
+        "true_0": {
+            "predicted_0": int(train_cm[0, 0]),
+            "predicted_1": int(train_cm[0, 1]),
+        },
+        "true_1": {
+            "predicted_0": int(train_cm[1, 0]),
+            "predicted_1": int(train_cm[1, 1]),
+        },
+    },
+    {
+        "type": "cm_matrix",
+        "dataset": "test",
+        "true_0": {
+            "predicted_0": int(test_cm[0, 0]),
+            "predicted_1": int(test_cm[0, 1]),
+        },
+        "true_1": {
+            "predicted_0": int(test_cm[1, 0]),
+            "predicted_1": int(test_cm[1, 1]),
+        },
+    },
+]
+
+# Guardar métricas y matrices de confusión en un archivo JSON
+
+os.makedirs("files/output", exist_ok=True)
+
+output_file = "files/output/metrics.json"
+if os.path.exists(output_file):
+    os.remove(output_file)
+with open(output_file, "w") as f:
+    for item in metrics:
+        f.write(str(item).replace("'", '"') + "\n")
+
+with open(output_file, "a") as f:
+    for item in confusion_matrices:
+        f.write(str(item).replace("'", '"') + "\n")
